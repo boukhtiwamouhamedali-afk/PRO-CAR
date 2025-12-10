@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<title>لعبة سباق صغيرة - لاعب ضد ذكاء اصطناعي (مبدئي)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  html,body{height:100%;margin:0;font-family:Tahoma,system-ui;background:#111;color:#eee}
+  #game{display:block;margin:0 auto;background:#333;border:6px solid #222;box-shadow:0 8px 30px rgba(0,0,0,0.7)}
+  #uiPanel{width:900px;margin:14px auto 0;text-align:center}
+  .small{font-size:13px;color:#bbb}
+  #info{display:flex;justify-content:space-between;align-items:center}
+  button{background:#1e90ff;border:none;padding:8px 12px;border-radius:8px;color:white;cursor:pointer}
+  button:active{transform:translateY(1px)}
+</style>
+</head>
+<body>
+  <div id="uiPanel">
+    <div id="info">
+      <div>
+        <strong id="status">جاهز</strong>
+        <span class="small"> - اضغط تشغيل للبدء</span>
+      </div>
+      <div>
+        <span class="small">تحكم: أسهم / WASD</span>
+        <button id="startBtn">تشغيل</button>
+        <button id="resetBtn">إعادة</button>
+      </div>
+    </div>
+    <div style="margin-top:8px;display:flex;justify-content:space-between">
+      <div class="small">لاعب: <span id="playerLap">0</span> لفة</div>
+      <div class="small">خصم (AI): <span id="aiLap">0</span> لفة</div>
+      <div class="small">سرعة: <span id="speed">0</span></div>
+    </div>
+  </div>
+  <canvas id="game" width="900" height="600"></canvas>
+
+<script>
+// لعبة سباق مبسطة - HTML5 Canvas
+// مميزات مبدئية:
+// - مضمار بسيط من حلقات سينوس/دائرة
+// - سيارة لاعب قابلة للتحكم بالمفاتيح
+// - سيارة AI تتبع نقاط طريق بسيطة
+// - عدادات لفات، سرعة، نتيجة مبدئية
+// يمكنك تطويرها بإضافة فيزيائية أفضل، أصوات، أكثر من عدو، مصادفات
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const startBtn = document.getElementById('startBtn');
+const resetBtn = document.getElementById('resetBtn');
+const statusEl = document.getElementById('status');
+const playerLapEl = document.getElementById('playerLap');
+const aiLapEl = document.getElementById('aiLap');
+const speedEl = document.getElementById('speed');
+
+let running = false;
+
+// إعداد المضمار: نقاط (waypoints) على شكل مضلع بيضاوي مع بعض الانحناءات
+function makeTrackPoints(cnt=36){
+  const pts = [];
+  for(let i=0;i<cnt;i++){
+    const a = (i/cnt)*Math.PI*2;
+    // مضمار بيضاوي مع موجات بسيطة
+    const rX = 240 + Math.sin(a*3)*20;
+    const rY = 160 + Math.cos(a*2)*14;
+    const x = W/2 + Math.cos(a)*rX;
+    const y = H/2 + Math.sin(a)*rY;
+    pts.push({x,y});
+  }
+  return pts;
+}
+const trackPts = makeTrackPoints(48);
+
+// حساب مسارات داخلية وخارجية للرسم
+function computeTrackShape(points, width=80){
+  // سنبقي البساطة: نولد مسار مركزي ثم نحسب نواقل عمودية
+  const left = [], right = [];
+  for(let i=0;i<points.length;i++){
+    const p = points[(i+points.length-1)%points.length];
+    const c = points[i];
+    const n = points[(i+1)%points.length];
+    const vx = n.x - p.x;
+    const vy = n.y - p.y;
+    // اتجاه طولي
+    const len = Math.hypot(vx,vy)||1;
+    const nx = -vy/len; // عمودي
+    const ny = vx/len;
+    left.push({x:c.x + nx*(width/2), y:c.y + ny*(width/2)});
+    right.push({x:c.x - nx*(width/2), y:c.y - ny*(width/2)});
+  }
+  return {left,right};
+}
+const trackShape = computeTrackShape(trackPts, 84);
+
+// سيارة (حالة مشتركة)
+class Car{
+  constructor(x,y,angle=0,color='#ff0'){
+    this.x = x; this.y = y; this.angle = angle; // بالرش
+    this.vel = 0; this.steer = 0; this.acc = 0;
+    this.width = 34; this.length = 50;
+    this.maxSpeed = 5.4; this.maxReverse = -2.2;
+    this.color = color;
+    this.lap = 0;
+    this.targetIdx = 0; // للـ AI
+  }
+  update(dt){
+    // الفيزياء مبسطة
+    const accelPower = 6;
+    // تحديث السرعة
+    this.vel += this.acc * accelPower * dt;
+    // فرملة اصطناعية
+    this.vel *= (1 - Math.min(0.06*dt, 0.06));
+    if(this.vel > this.maxSpeed) this.vel = this.maxSpeed;
+    if(this.vel < this.maxReverse) this.vel = this.maxReverse;
+    // دوران بالعجلة
+    const turnSpeed = 2.8; // حساسية
+    this.angle += this.steer * turnSpeed * (this.vel/2 + 1) * dt;
+    // حركة
+    this.x += Math.cos(this.angle) * this.vel * 60 * dt;
+    this.y += Math.sin(this.angle) * this.vel * 60 * dt;
+  }
+  draw(ctx){
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    ctx.rotate(this.angle);
+    // ظل
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(-this.length/2+6, -this.width/2+6, this.length, this.width);
+    // جسم
+    ctx.fillStyle = this.color;
+    ctx.fillRect(-this.length/2, -this.width/2, this.length, this.width);
+    // نافذة
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(-6, -this.width/2+4, 18, this.width/3);
+    ctx.restore();
+  }
+}
+
+// إنشاء سيارات: لاعب وخصم
+const player = new Car(trackPts[0].x, trackPts[0].y, 0, '#00ccff');
+const ai = new Car(trackPts[4].x, trackPts[4].y, 0, '#ff5555');
+ai.maxSpeed = 4.6;
+
+// نظام مفاتيح
+const keys = {};
+addEventListener('keydown', e=>{keys[e.key.toLowerCase()]=true;e.preventDefault();});
+addEventListener('keyup', e=>{keys[e.key.toLowerCase()]=false;e.preventDefault();});
+
+function handlePlayerInput(){
+  // تسارع/تراجع
+  if(keys['arrowup'] || keys['w']){ player.acc = 1; }
+  else if(keys['arrowdown'] || keys['s']){ player.acc = -1; }
+  else player.acc = 0;
+  // توجيه
+  if(keys['arrowleft'] || keys['a']) player.steer = -1;
+  else if(keys['arrowright'] || keys['d']) player.steer = 1;
+  else player.steer = 0;
+}
+
+// AI بسيط يتبع نقاط الطريق
+function updateAI(aiCar, dt){
+  const target = trackPts[aiCar.targetIdx];
+  const dx = target.x - aiCar.x; const dy = target.y - aiCar.y;
+  const desiredAngle = Math.atan2(dy,dx);
+  let diff = desiredAngle - aiCar.angle;
+  // تطبيع الزاوية بين -PI و PI
+  while(diff > Math.PI) diff -= Math.PI*2;
+  while(diff < -Math.PI) diff += Math.PI*2;
+  // ضبط التوجيه بناءً على الاختلاف
+  aiCar.steer = Math.max(-1, Math.min(1, diff*2));
+  // سرعة تعتمد على الانحناء
+  const angleAbs = Math.abs(diff);
+  const speedFactor = angleAbs > 0.6 ? 0.5 : (angleAbs > 0.3 ? 0.8 : 1);
+  aiCar.acc = speedFactor * 0.9;
+  // تقدم للنقطة التالية إذا اقتربنا
+  const dist = Math.hypot(dx,dy);
+  if(dist < 40){ aiCar.targetIdx = (aiCar.targetIdx + 1) % trackPts.length; }
+}
+
+// تابع لاكتشاف تخطي خط النهاية (نقطة مرجعية) لحساب اللفات
+const finishLine = {
+  a: trackPts[0],
+  b: trackPts[2]
+};
+function crossedLine(prev, curr, line){
+  // check segment intersection between prev->curr and line.a->line.b
+  function orient(p,q,r){ return (q.x-p.x)*(r.y-p.y) - (q.y-p.y)*(r.x-p.x); }
+  const o1 = orient(prev,curr,line.a);
+  const o2 = orient(prev,curr,line.b);
+  const o3 = orient(line.a,line.b,prev);
+  const o4 = orient(line.a,line.b,curr);
+  return (o1*o2<0) && (o3*o4<0);
+}
+
+let lastPlayerPos = {x:player.x,y:player.y};
+let lastAiPos = {x:ai.x,y:ai.y};
+
+// رسم المضمار
+function drawTrack(){
+  // أرضية
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(0,0,W,H);
+  // محيط
+  // مسار
+  ctx.beginPath();
+  const L = trackShape.left, R = trackShape.right;
+  // نرسم الشق الأيمن ثم الأيسر بالعكس لتشكيل شكل مغلق
+  for(let i=0;i<R.length;i++){
+    const p = R[i];
+    if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+  }
+  for(let i=L.length-1;i>=0;i--){ const p = L[i]; ctx.lineTo(p.x,p.y); }
+  ctx.closePath();
+  ctx.fillStyle = '#666';
+  ctx.fill();
+  // حواف
+  ctx.lineWidth = 4; ctx.strokeStyle = '#222'; ctx.stroke();
+
+  // رسم نقاط الطريق للمساعدة
+  for(let i=0;i<trackPts.length;i++){
+    const p = trackPts[i];
+    ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.fill();
+  }
+
+  // خط النهاية
+  ctx.beginPath(); ctx.moveTo(finishLine.a.x, finishLine.a.y); ctx.lineTo(finishLine.b.x, finishLine.b.y);
+  ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke();
+}
+
+// تحديث وحلقة رسم
+let lastTime = performance.now();
+function loop(now){
+  const dt = Math.min(0.035, (now - lastTime)/1000); lastTime = now;
+  if(running){
+    // إدخال لاعب
+    handlePlayerInput();
+    player.update(dt);
+    // AI
+    updateAI(ai,dt);
+    ai.update(dt);
+    // تحقق خط النهاية
+    if(crossedLine(lastPlayerPos, {x:player.x,y:player.y}, finishLine)){
+      player.lap++;
+      playerLapEl.textContent = player.lap;
+    }
+    if(crossedLine(lastAiPos, {x:ai.x,y:ai.y}, finishLine)){
+      ai.lap++;
+      aiLapEl.textContent = ai.lap;
+    }
+    lastPlayerPos.x = player.x; lastPlayerPos.y = player.y;
+    lastAiPos.x = ai.x; lastAiPos.y = ai.y;
+    // حد السرعة للعرض
+    speedEl.textContent = Math.round(player.vel*100);
+  }
+
+  // رسم
+  drawTrack();
+  // رسم سيارات
+  ai.draw(ctx);
+  player.draw(ctx);
+
+  // HUD بسيطة
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(8,8,260,56);
+  ctx.fillStyle = '#fff'; ctx.font = '14px Tahoma';
+  ctx.fillText('لاعب: W/↑ - A/← - S/↓ - D/→', 16, 28);
+  ctx.fillText('لفات: ' + player.lap + ' / خصم: ' + ai.lap, 16, 48);
+
+  requestAnimationFrame(loop);
+}
+
+startBtn.addEventListener('click', ()=>{
+  if(!running){ running = true; statusEl.textContent = 'قيد اللعب'; startBtn.textContent = 'إيقاف'; lastTime = performance.now(); }
+  else{ running = false; statusEl.textContent = 'موقوف'; startBtn.textContent = 'تشغيل'; }
+});
+
+resetBtn.addEventListener('click', ()=>{
+  // إعادة مواضع
+  player.x = trackPts[0].x; player.y = trackPts[0].y; player.angle = 0; player.vel = 0; player.lap = 0;
+  ai.x = trackPts[4].x; ai.y = trackPts[4].y; ai.angle = 0; ai.vel = 0; ai.lap = 0; ai.targetIdx = 4;
+  playerLapEl.textContent = '0'; aiLapEl.textContent = '0'; statusEl.textContent = 'جاهز'; startBtn.textContent = 'تشغيل'; running = false;
+});
+
+// بداية الحلقة
+requestAnimationFrame(loop);
+
+// لمسة أخيرة: إعادة ضبط على تغيير حجم الشاشة (حفاظًا على نسبة العرض)
+addEventListener('resize', ()=>{
+  // لا نغير أبعاد الكانفاس في هذه النسخة البسيطة
+});
+
+</script>
+</body>
+</html>
